@@ -1,0 +1,161 @@
+name: Задание на сервере
+
+# ЭТОТ ФАЙЛ ЖИВЁТ В ПУБЛИЧНОМ РЕПОЗИТОРИИ. Здесь нет и не должно быть ничего
+# ценного: ни кода проекта, ни адресов, ни паролей. Только механизм запуска.
+#
+# ЗАЧЕМ ТАК. Из среды Claude до сервера не дотянуться: порт SSH наружу закрыт,
+# клиента нет и поставить нельзя, панель хостинга закрыта на уровне сети —
+# всё проверено. Машины GitHub ходят в интернет свободно, но на закрытом
+# репозитории у владельца кончились минуты, а карты для оплаты нет.
+# На публичных репозиториях минуты не считаются вовсе — отсюда этот пульт.
+#
+# Код проекта остаётся закрытым: пульт забирает его по токену только на время
+# выполнения, внутрь публичного репозитория он не попадает никогда.
+#
+# ЧТО ВИДНО ПОСТОРОННИМ. Журнал выполнения публичный. Значения секретов GitHub
+# замазывает, но всё, что печатают задания, видно всем. Поэтому задания не
+# печатают ни адрес сервера, ни пароли, ни содержимое базы.
+#
+# Автоматического запуска по push здесь нет намеренно: репозиторий публичный,
+# и запуск по событию означал бы, что посторонний может добиться выполнения
+# кода на живой машине. Только кнопка, и только у владельца репозитория.
+
+on:
+  workflow_dispatch:
+    inputs:
+      zadanie:
+        description: 'Имя скрипта из deploy/tasks/ без расширения'
+        required: true
+        default: 'osmotr'
+        type: string
+      vetka:
+        description: 'Ветка закрытого репозитория'
+        required: true
+        default: 'claude/analyze-tz-agent-jl1e4d'
+        type: string
+
+# Два одновременных задания подрались бы за каталог и за базу. Второе ждёт
+# первого, а не отменяет его: оборвать на середине установки хуже, чем ждать.
+concurrency:
+  group: server
+  cancel-in-progress: false
+
+jobs:
+  vypolnit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Проверить, что доступы настроены
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          PASS: ${{ secrets.SERVER_PASSWORD }}
+          TOKEN: ${{ secrets.REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          OSHIBKA=0
+          [ -n "$HOST" ]  || { echo "Не задан секрет SERVER_HOST (адрес сервера)"; OSHIBKA=1; }
+          [ -n "$PASS" ]  || { echo "Не задан секрет SERVER_PASSWORD (пароль root)"; OSHIBKA=1; }
+          [ -n "$TOKEN" ] || { echo "Не задан секрет REPO_TOKEN (доступ к закрытому коду)"; OSHIBKA=1; }
+          if [ "$OSHIBKA" = "1" ]; then
+            echo
+            echo "Добавить: Settings -> Secrets and variables -> Actions -> New repository secret"
+            exit 1
+          fi
+
+      - name: Забрать закрытый код
+        env:
+          TOKEN: ${{ secrets.REPO_TOKEN }}
+          VETKA: ${{ inputs.vetka }}
+        run: |
+          set -euo pipefail
+          # Токен уходит в адрес, а не в файл и не в вывод. GitHub замазывает
+          # его в журнале, но полагаться на замазывание там, где можно просто
+          # не печатать, не стоит.
+          git clone --quiet --depth 1 --branch "$VETKA" \
+            "https://x-access-token:${TOKEN}@github.com/nosachev56/trade.git" kod
+          echo "код получен, файлов: $(find kod -type f -not -path '*/.git/*' | wc -l)"
+
+      - name: Проверить, что задание существует
+        env:
+          ZADANIE: ${{ inputs.zadanie }}
+        run: |
+          set -euo pipefail
+          # Имя приходит извне — берём только базовое, чтобы нельзя было
+          # выйти за пределы каталога заданий.
+          IMYA="$(basename -- "$ZADANIE")"
+          if [ ! -f "kod/deploy/tasks/${IMYA}.sh" ]; then
+            echo "Задания deploy/tasks/${IMYA}.sh нет. Доступные:"
+            ls -1 kod/deploy/tasks/ 2>/dev/null | sed 's/\.sh$//' || echo "  (пусто)"
+            exit 1
+          fi
+          echo "IMYA=$IMYA" >> "$GITHUB_ENV"
+
+      - name: Поставить клиент SSH
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+      - name: Проверить связь с сервером
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          SSHPASS: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Имя машины не печатаем: журнал публичный.
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+              "root@$HOST" 'echo "связь есть, машина на ногах: $(uptime -p)"'
+
+      - name: Хватает ли места на сервере
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          SSHPASS: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # На машине, где кончилось место, не работает уже ничего, а
+          # кончается оно тихо. Честно не начать дешевле, чем разбирать
+          # потом, почему сломалось всё разом. Опыт ЭЛЕРА.
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "root@$HOST" '
+            SVOBODNO=$(df -Pm / | awk "NR==2{print \$4}")
+            echo "свободно ${SVOBODNO} МБ"
+            if [ "$SVOBODNO" -lt 1500 ]; then
+              echo "Меньше 1500 МБ — не начинаю. Что занимает место:"
+              du -sh /opt/* /var/lib/docker 2>/dev/null | sort -h | tail -10
+              exit 1
+            fi'
+
+      - name: Доставить код на сервер
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          SSHPASS: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Передаём архивом по тому же соединению: так серверу не нужен ни
+          # ключ развёртывания, ни собственный доступ к GitHub.
+          tar czf - -C kod --exclude=.git --exclude=__pycache__ . \
+            | sshpass -e ssh -o StrictHostKeyChecking=accept-new "root@$HOST" \
+                'mkdir -p /opt/carhunt && tar xzf - -C /opt/carhunt && echo "код доставлен"'
+
+      - name: Выполнить задание
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          SSHPASS: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "=== Выполняю $IMYA ==="
+          # ВАЖНО: фоновые процессы, запущенные отсюда, умрут вместе с
+          # соединением. Долгую работу задание должно ставить отдельной
+          # службой (systemd-run --unit=... --collect), иначе она погибнет
+          # молча, а внешне всё будет выглядеть работающим. Грабли ЭЛЕРА.
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "root@$HOST" \
+              "bash /opt/carhunt/deploy/tasks/${IMYA}.sh"
+
+      - name: Сводка
+        if: always()
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          SSHPASS: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+              "root@$HOST" 'echo "Диск: $(df -h / | awk "NR==2{print \$4}") свободно | Память: $(free -h | awk "/Mem:/{print \$7}") доступно"' \
+            || echo "сводку снять не удалось"
