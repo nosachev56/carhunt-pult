@@ -1,0 +1,54 @@
+name: Каталог Timeweb
+
+# Что можно заказать: образы, тарифы, конфигуратор, зоны. Только чтение.
+# Нужно, чтобы собрать новую машину такой же, как нынешняя, а не «примерно».
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smotret:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Каталог
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          sprosit() {
+            curl -s -m 30 -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' "$API$1"
+          }
+
+          echo "=============== ОБРАЗЫ UBUNTU =============="
+          sprosit /os/servers | jq -r '
+            .servers_os[]? | select(.name | ascii_downcase | test("ubuntu")) |
+            "id=\(.id)  \(.name) \(.version)  \(.requirements.disk_min // "?") ГБ мин"' 2>/dev/null \
+            || sprosit /os/servers | head -c 1500
+
+          echo
+          echo "=============== КОНФИГУРАТОРЫ =============="
+          # Нынешняя машина собрана «своей конфигурацией», значит нужен
+          # конфигуратор, а не готовый тариф.
+          sprosit /configurator/servers | jq -r '
+            .server_configurators[]? |
+            "id=\(.id)  локация=\(.location)  зоны=\(.availability_zones // [] | join(","))",
+            "   ядра:  \(.requirements.cpu_min)-\(.requirements.cpu_max) шаг \(.requirements.cpu_step // 1)",
+            "   память: \(.requirements.ram_min)-\(.requirements.ram_max) шаг \(.requirements.ram_step // 1)",
+            "   диск:   \(.requirements.disk_min)-\(.requirements.disk_max) шаг \(.requirements.disk_step // 1)",
+            "   типы дисков: \(.disk_type // "?")",
+            ""' 2>/dev/null || sprosit /configurator/servers | head -c 2000
+
+          echo
+          echo "=============== ЛОКАЦИИ И ЗОНЫ =============="
+          sprosit /locations | jq -c '.' 2>/dev/null | head -c 1200 || echo "не разобрал"
+
+          echo
+          echo "=============== ЧТО СЕЙЧАС У «ПЕРЕКУПА» =============="
+          sprosit /servers/8879979 | jq '.server | {os, configurator_id, cpu, ram, disks: [.disks[]? | {size, type}], location, availability_zone, preset_id, image_id}' 2>/dev/null \
+            || echo "не разобрал"
+
+          echo
+          echo "=============== ДЕНЬГИ =============="
+          sprosit /account/finances | jq -c '.' 2>/dev/null | head -c 600 || echo "не разобрал"
