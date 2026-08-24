@@ -1,11 +1,11 @@
-name: "ИИ-шлюз: где принимаются запросы"
+name: "ИИ Timeweb: что это на самом деле"
 
-# Список моделей отдаётся по api.timeweb.cloud/api/v1/cloud-ai/models, а
-# запрос к модели по тому же пути с /chat/completions даёт 404. Значит адрес
-# запросов другой. Перебираем разумные варианты: это дешевле и надёжнее,
-# чем гадать — документация Timeweb из среды агента недоступна.
+# Выяснилось, что «Облачные ИИ» у Timeweb — конструктор агентов, а не шлюз
+# к моделям: в перечне методов есть создание агента, его настройки, пакеты
+# токенов и статистика, но нет ни одного метода «спросить модель».
 #
-# Тело запроса самое дешёвое: одно слово, десять токенов ответа.
+# Здесь дочитываем подробности, от которых зависит решение: какие модели,
+# что с ценами и квотами, заведены ли уже агенты.
 
 on:
   workflow_dispatch:
@@ -13,59 +13,34 @@ on:
 jobs:
   iskat:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Перебор адресов
+      - name: Подробности
         env:
           TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
         run: |
           set -uo pipefail
-          TELO='{"model":"anthropic/claude-haiku-4-5","max_tokens":10,"messages":[{"role":"user","content":"скажи: ок"}]}'
+          API="https://api.timeweb.cloud"
+          sprosit() { curl -s -m 30 -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' "$API$1"; }
 
-          probovat() {
-            KOD=$(curl -s -o o.json -m 25 -w '%{http_code}' -X POST "$1" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H 'Content-Type: application/json' \
-              -d "$TELO")
-            printf '%-72s %s\n' "$1" "$KOD"
-            case "$KOD" in
-              200|201) echo "    ОТВЕТ: $(head -c 400 o.json)"; return 0 ;;
-              400|422) echo "    адрес есть, не понравилось тело: $(head -c 300 o.json)"; return 0 ;;
-              401|403) echo "    адрес есть, не пустил ключ: $(head -c 200 o.json)" ;;
-              *) : ;;
-            esac
-            return 1
-          }
-
-          NASHLI=0
-          for U in \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/chat/completions" \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/v1/chat/completions" \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/completions" \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/generate" \
-            "https://api.timeweb.cloud/api/v1/ai/chat/completions" \
-            "https://agent.timeweb.cloud/api/v1/cloud-ai/chat/completions" \
-            "https://agent.timeweb.cloud/v1/chat/completions" \
-            "https://agent.timeweb.cloud/api/v1/chat/completions" \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/models/chat/completions"
-          do
-            probovat "$U" && NASHLI=1
-          done
+          echo "=============== ЗАВЕДЁННЫЕ АГЕНТЫ =============="
+          sprosit /api/v1/cloud-ai/agents | head -c 800
+          echo
 
           echo
-          echo "=============== ЧТО ЕЩЁ ЕСТЬ ПОД cloud-ai =============="
-          # Иногда сам раздел отвечает списком своих путей.
-          for U in \
-            "https://api.timeweb.cloud/api/v1/cloud-ai" \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/balance" \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/providers" \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/api-keys"
-          do
-            KOD=$(curl -s -o o.json -m 25 -w '%{http_code}' \
-              -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' "$U")
-            printf '%-72s %s\n' "$U" "$KOD"
-            [ "$KOD" = "200" ] && echo "    $(head -c 500 o.json)"
-          done
+          echo "=============== МОДЕЛИ, ПОДРОБНО (v3) =============="
+          sprosit /api/v3/cloud-ai/models > v3.json
+          echo "всего: $(jq -r '.meta.total // "?"' v3.json)"
+          echo
+          echo "поля, которые есть у модели:"
+          jq -r '[.models[0] // {} | keys[]] | join(", ")' v3.json 2>/dev/null || head -c 400 v3.json
+          echo
+          echo "Claude целиком:"
+          jq '[.models[]? | select(.model_name | test("claude";"i"))][0]' v3.json 2>/dev/null | head -c 1200
+          echo
 
           echo
-          [ "$NASHLI" = "1" ] || echo "Ни один адрес не принял запрос к модели."
+          echo "=============== ПАКЕТЫ ТОКЕНОВ =============="
+          # Ключевое для решения: это подписка с квотой или оплата по факту.
+          sprosit /api/v1/cloud-ai/token-packages/agents | head -c 900
+          echo
