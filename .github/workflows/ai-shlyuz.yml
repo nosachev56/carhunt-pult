@@ -1,9 +1,11 @@
-name: "ИИ-шлюз Timeweb: что там есть"
+name: "ИИ-шлюз Timeweb: какие модели"
 
-# Только чтение. Выясняет, принимает ли шлюз обычный ключ Timeweb и какие
-# модели он отдаёт. От ответа зависит вся схема оценки автомобилей:
-# api.anthropic.com с российского сервера закрыт по региону (403), и шлюз —
-# единственный способ дотянуться до модели, не возя фотографии за границу.
+# Только чтение. Шлюз живёт по адресу api.timeweb.cloud/api/v1/cloud-ai и
+# открывается обычным ключом Timeweb — отдельный заводить не нужно.
+#
+# От того, что там есть, зависит вся схема оценки: api.anthropic.com с
+# российского сервера закрыт по региону (403), и шлюз — единственный способ
+# дотянуться до модели, не возя фотографии за границу.
 
 on:
   workflow_dispatch:
@@ -13,30 +15,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Отвечает ли шлюз на ключ Timeweb
+      - name: Список моделей
         env:
           TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
         run: |
           set -uo pipefail
-          for URL in \
-            "https://agent.timeweb.cloud/api/v1/cloud-ai/models" \
-            "https://api.timeweb.cloud/api/v1/cloud-ai/models" \
-            "https://agent.timeweb.cloud/api/v1/models"
-          do
-            KOD=$(curl -s -o otvet.json -m 30 -w '%{http_code}' \
-                  -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' "$URL")
-            printf '%-58s %s\n' "$URL" "$KOD"
-            if [ "$KOD" = "200" ]; then
-              echo "  --- что отдал ---"
-              jq -r '..|objects|select(has("id") or has("name"))|
-                     (.id // .name) + "   " + ((.description // "") | tostring)' otvet.json 2>/dev/null \
-                | sort -u | head -40 || head -c 1500 otvet.json
-              echo "  --- конец ---"
-              exit 0
-            fi
-            head -c 300 otvet.json 2>/dev/null; echo
-          done
+          curl -s -m 30 -o modeli.json \
+            -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/models"
+
+          echo "всего моделей: $(jq -r '.meta.total' modeli.json)"
           echo
-          echo "Ни один адрес не принял ключ Timeweb."
-          echo "Значит у шлюза свой ключ, и его надо завести в панели отдельно."
-          exit 1
+          echo "=============== CLAUDE =============="
+          jq -r '.models[] | select(.model_name | test("claude"; "i")) |
+            "\(.model_name)",
+            "   показывается как: \(.public_name)",
+            "   вид: \(.type)   рассуждающая: \(.is_reasoning)",
+            "   снята: \(.is_deprecated)   остановлена: \(.is_stopped)",
+            "   потолок ответа: \(.params_info.max_tokens.max // "?")",
+            ""' modeli.json
+
+          echo "=============== ЧТО ЕЩЁ УМЕЕТ ВИДЕТЬ =============="
+          # Модели с распознаванием изображений могут называться иначе:
+          # смотрим все виды, а не только llm.
+          echo "виды моделей и сколько их:"
+          jq -r '.models[] | .type' modeli.json | sort | uniq -c | sort -rn
+
+          echo
+          echo "не снятые с обслуживания, по поставщикам:"
+          jq -r '.models[] | select(.is_stopped == false and .is_deprecated == false) |
+                 (.model_name | split("/")[0])' modeli.json | sort | uniq -c | sort -rn
+
+          echo
+          echo "=============== ВСЕ ЖИВЫЕ МОДЕЛИ =============="
+          jq -r '.models[] | select(.is_stopped == false and .is_deprecated == false) |
+                 "\(.model_name)   [\(.type)]"' modeli.json | sort
