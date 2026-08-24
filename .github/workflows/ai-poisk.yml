@@ -1,0 +1,71 @@
+name: "ИИ-шлюз: где принимаются запросы"
+
+# Список моделей отдаётся по api.timeweb.cloud/api/v1/cloud-ai/models, а
+# запрос к модели по тому же пути с /chat/completions даёт 404. Значит адрес
+# запросов другой. Перебираем разумные варианты: это дешевле и надёжнее,
+# чем гадать — документация Timeweb из среды агента недоступна.
+#
+# Тело запроса самое дешёвое: одно слово, десять токенов ответа.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  iskat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Перебор адресов
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          TELO='{"model":"anthropic/claude-haiku-4-5","max_tokens":10,"messages":[{"role":"user","content":"скажи: ок"}]}'
+
+          probovat() {
+            KOD=$(curl -s -o o.json -m 25 -w '%{http_code}' -X POST "$1" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "$TELO")
+            printf '%-72s %s\n' "$1" "$KOD"
+            case "$KOD" in
+              200|201) echo "    ОТВЕТ: $(head -c 400 o.json)"; return 0 ;;
+              400|422) echo "    адрес есть, не понравилось тело: $(head -c 300 o.json)"; return 0 ;;
+              401|403) echo "    адрес есть, не пустил ключ: $(head -c 200 o.json)" ;;
+              *) : ;;
+            esac
+            return 1
+          }
+
+          NASHLI=0
+          for U in \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/chat/completions" \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/v1/chat/completions" \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/completions" \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/generate" \
+            "https://api.timeweb.cloud/api/v1/ai/chat/completions" \
+            "https://agent.timeweb.cloud/api/v1/cloud-ai/chat/completions" \
+            "https://agent.timeweb.cloud/v1/chat/completions" \
+            "https://agent.timeweb.cloud/api/v1/chat/completions" \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/models/chat/completions"
+          do
+            probovat "$U" && NASHLI=1
+          done
+
+          echo
+          echo "=============== ЧТО ЕЩЁ ЕСТЬ ПОД cloud-ai =============="
+          # Иногда сам раздел отвечает списком своих путей.
+          for U in \
+            "https://api.timeweb.cloud/api/v1/cloud-ai" \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/balance" \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/providers" \
+            "https://api.timeweb.cloud/api/v1/cloud-ai/api-keys"
+          do
+            KOD=$(curl -s -o o.json -m 25 -w '%{http_code}' \
+              -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' "$U")
+            printf '%-72s %s\n' "$U" "$KOD"
+            [ "$KOD" = "200" ] && echo "    $(head -c 500 o.json)"
+          done
+
+          echo
+          [ "$NASHLI" = "1" ] || echo "Ни один адрес не принял запрос к модели."
