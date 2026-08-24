@@ -1,0 +1,104 @@
+name: Удалить старую машину
+
+# НЕОБРАТИМОЕ ДЕЙСТВИЕ. Владелец разрешил удалить машину 8879979 («Перекуп»),
+# которую заменила 8903371 («Перекуп 2»). Данных проекта на старой нет:
+# ничего, кроме недоустановленного исполнителя, туда не доехало.
+#
+# Защита от случайного запуска: номер машины вводится руками и сверяется.
+# Номер новой машины сюда ввести нельзя — он отвергается отдельной проверкой.
+
+on:
+  workflow_dispatch:
+    inputs:
+      nomer:
+        description: 'Номер удаляемой машины (для сверки)'
+        required: true
+        default: ''
+        type: string
+
+jobs:
+  udalit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Сверка
+        env:
+          NOMER: ${{ inputs.nomer }}
+        run: |
+          set -euo pipefail
+          STARAYA=8879979
+          NOVAYA=8903371
+          if [ "$NOMER" = "$NOVAYA" ]; then
+            echo "Это номер НОВОЙ, работающей машины. Отказываюсь."
+            exit 1
+          fi
+          if [ "$NOMER" != "$STARAYA" ]; then
+            echo "Номер не совпал со старой машиной ($STARAYA). Ничего не делаю."
+            exit 1
+          fi
+          echo "сверка пройдена"
+
+      - name: Что именно удаляется
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          # Последний взгляд перед необратимым: имя и состояние должны
+          # совпасть с ожидаемыми, иначе номер устарел.
+          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/servers/8879979" \
+            | jq -r '.server | "удаляю: id=\(.id)  имя=\(.name)  состояние=\(.status)  создан=\(.created_at)"'
+
+      - name: Удалить
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          KOD=$(curl -s -o otvet.json -w '%{http_code}' -m 120 -X DELETE \
+            -H "Authorization: Bearer $TOKEN" "$API/servers/8879979")
+          echo "ответ: $KOD"
+          cat otvet.json 2>/dev/null | head -c 500
+          echo
+          case "$KOD" in
+            200|202|204) echo "удаление принято" ;;
+            *) echo "не удалилось"; exit 1 ;;
+          esac
+
+      - name: Освободился ли адрес
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          sleep 20
+          # Отвязанный плавающий адрес продолжает тарифицироваться сам по
+          # себе. Это самая частая забытая строка в счёте после удаления.
+          OSIROTEL=$(curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/floating-ips" \
+            | jq -r '.ips[]? | select(.resource_id == null or .resource_id == 8879979) | .id')
+          if [ -z "$OSIROTEL" ]; then
+            echo "лишних адресов не осталось"
+          else
+            for A in $OSIROTEL; do
+              echo "освобождаю адрес $A"
+              curl -s -o /dev/null -w 'ответ: %{http_code}\n' -m 60 -X DELETE \
+                -H "Authorization: Bearer $TOKEN" "$API/floating-ips/$A"
+            done
+          fi
+
+      - name: Что осталось и во сколько обходится
+        if: always()
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          echo "машины:"
+          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/servers" \
+            | jq -r '.servers[]? | "  id=\(.id)  \(.name)  \(.status)"'
+          echo "адреса:"
+          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/floating-ips" \
+            | jq -r '.ips[]? | "  \(.id)  привязан к \(.resource_type // "НИ К ЧЕМУ") \(.resource_id // "")"'
+          echo "счёт:"
+          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/account/finances" \
+            | jq -r '.finances | "  в час: \(.hourly_cost)   в месяц: \(.monthly_cost)   баланс: \(.balance)"'
