@@ -1,0 +1,91 @@
+name: Разведка Timeweb
+
+# Смотрит, как устроен сервер в панели Timeweb, и ничего не меняет.
+# Задача — понять, почему до машины не доходят входящие соединения.
+#
+# ЖУРНАЛ ПУБЛИЧНЫЙ. Все адреса в выводе заменяются заглушками: замазывание
+# секретов у GitHub срабатывает только при точном совпадении строк, а здесь
+# адреса приезжают из ответа API и под секрет не подпадают.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smotret:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Разведка
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          if [ -z "$TOKEN" ]; then echo "секрет TIMEWEB_TOKEN пуст"; exit 1; fi
+
+          # Заглушки вместо адресов — журнал открыт всем.
+          skryt() {
+            sed -E 's/([0-9]{1,3}\.){3}[0-9]{1,3}/АДРЕС-IPV4/g; s/\b([0-9a-f]{1,4}:){2,}[0-9a-f:]*\b/АДРЕС-IPV6/g'
+          }
+          sprosit() {
+            curl -s -m 30 -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' "$API$1"
+          }
+
+          echo "=============== ДОСТУП =============="
+          KOD=$(curl -s -o /dev/null -m 30 -w '%{http_code}' \
+                -H "Authorization: Bearer $TOKEN" "$API/account/status")
+          echo "ответ на проверку ключа: $KOD"
+          if [ "$KOD" = "401" ] || [ "$KOD" = "403" ]; then
+            echo "Ключ не принят. Скорее всего скопирован не полностью или уже отозван."
+            exit 1
+          fi
+
+          echo
+          echo "=============== СЕРВЕРЫ =============="
+          SERVERY=$(sprosit /servers)
+          echo "$SERVERY" | jq -r '
+            .servers[]? |
+            "id: \(.id)  имя: \(.name)  состояние: \(.status)",
+            "  тариф:      \(.preset_id // "своя конфигурация")",
+            "  ядер:       \(.cpu)   память: \(.ram) МБ   диск: \((.disks[0].size // 0)) МБ",
+            "  ОС:         \(.os.name // "?") \(.os.version // "")",
+            "  локация:    \(.location // "?")  зона: \(.availability_zone // "?")",
+            "  DDOS-щит:   \(.is_ddos_guard)",
+            "  канал:      \(.bandwidth // "?") Мбит",
+            "  создан:     \(.created_at // "?")",
+            ""' 2>/dev/null | skryt || echo "$SERVERY" | head -c 2000 | skryt
+
+          ID=$(echo "$SERVERY" | jq -r '.servers[0].id // empty' 2>/dev/null)
+          if [ -z "$ID" ]; then
+            echo "Не разобрал список серверов. Сырой ответ, первые 2000 знаков:"
+            echo "$SERVERY" | head -c 2000 | skryt
+            exit 1
+          fi
+          echo "Дальше смотрю сервер id=$ID"
+
+          echo
+          echo "=============== АДРЕСА ЭТОГО СЕРВЕРА =============="
+          # Здесь самое интересное: как именно выдан публичный IPv4.
+          sprosit "/servers/$ID/ips" | jq '.' 2>/dev/null | skryt \
+            || sprosit "/servers/$ID/ips" | head -c 2000 | skryt
+
+          echo
+          echo "=============== СЕТЕВЫЕ НАСТРОЙКИ =============="
+          sprosit "/servers/$ID" | jq '.server | {networks, is_local_network, is_ddos_guard, status, start_at}' 2>/dev/null | skryt \
+            || echo "не разобрал"
+
+          echo
+          echo "=============== ГРУППЫ ПРАВИЛ (ФАЙРВОЛ) =============="
+          sprosit "/firewall/groups" | jq -c '.' 2>/dev/null | head -c 1500 | skryt || echo "не разобрал"
+
+          echo
+          echo "=============== ПЛАВАЮЩИЕ АДРЕСА =============="
+          # Если публичный адрес заведён как плавающий и не привязан к машине,
+          # снаружи она недостижима — а в панели адрес виден. Проверяем.
+          sprosit "/floating-ips" | jq -c '.' 2>/dev/null | head -c 1500 | skryt || echo "не разобрал"
+
+          echo
+          echo "=============== ЖУРНАЛ СЕРВЕРА =============="
+          sprosit "/servers/$ID/logs" | jq -r '.server_logs[]? | "\(.logged_at)  \(.event)"' 2>/dev/null | tail -20 | skryt \
+            || echo "не разобрал"
