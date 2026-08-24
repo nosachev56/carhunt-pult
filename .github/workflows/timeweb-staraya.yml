@@ -1,0 +1,58 @@
+name: Что тянет за собой старая машина
+
+# Только чтение. Показывает, что кроме самого сервера продолжает
+# тарифицироваться: плавающий адрес и снимки живут отдельными сущностями и
+# после удаления машины могут остаться висеть в счёте.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smotret:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Осмотр
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          STARAYA=8879979
+          skryt() { sed -E 's/([0-9]{1,3}\.){3}[0-9]{1,3}/АДРЕС-IPV4/g; s/\b([0-9a-f]{1,4}:){2,}[0-9a-f:]*\b/АДРЕС-IPV6/g'; }
+          sprosit() { curl -s -m 30 -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' "$API$1"; }
+
+          echo "=============== ВСЕ МАШИНЫ =============="
+          sprosit /servers | jq -r '.servers[]? |
+            "id=\(.id)  \(.name)  \(.status)  \(.cpu) ядер / \(.ram) МБ"' | skryt
+
+          echo
+          echo "=============== СНИМКИ СТАРОЙ МАШИНЫ =============="
+          sprosit "/servers/$STARAYA/snapshots" | jq -r '
+            (.meta.total // 0) as $n |
+            if $n == 0 then "снимков нет" else
+              (.snapshots[]? | "id=\(.id)  \(.size) МБ  создан \(.created_at)  цена \(.cost // "?")")
+            end' 2>/dev/null || echo "не разобрал"
+
+          echo
+          echo "=============== ПЛАВАЮЩИЕ АДРЕСА =============="
+          # Отвязанный адрес продолжает тарифицироваться: это самая частая
+          # забытая строка в счёте после удаления машины.
+          sprosit /floating-ips | jq -r '
+            .ips[]? | "id=\(.id)  привязан к \(.resource_type // "НИ К ЧЕМУ") \(.resource_id // "")"' | skryt
+
+          echo
+          echo "=============== ДИСКИ =============="
+          sprosit "/servers/$STARAYA" | jq -r '.server.disks[]? | "id=\(.id)  \(.size) МБ  \(.type)  системный=\(.is_mounted)"' 2>/dev/null || echo "не разобрал"
+
+          echo
+          echo "=============== ОБРАЗЫ =============="
+          sprosit /images | jq -r '(.meta.total // 0) as $n | if $n == 0 then "образов нет" else (.images[]? | "id=\(.id)  \(.name)  \(.size) МБ") end' 2>/dev/null || echo "не разобрал"
+
+          echo
+          echo "=============== СЧЁТ =============="
+          sprosit /account/finances | jq -r '.finances |
+            "баланс: \(.balance) \(.currency)",
+            "в час:  \(.hourly_cost)",
+            "в месяц: \(.monthly_cost)",
+            "хватит на: \(.hours_left) часов"' 2>/dev/null || echo "не разобрал"
