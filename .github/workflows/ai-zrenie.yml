@@ -1,0 +1,44 @@
+name: "ИИ-шлюз: проходят ли картинки"
+
+# Главный вопрос всего проекта по части оценки: агент отправляет в модель до
+# восьми фотографий объявления. Если шлюз не умеет зрение, через него схема
+# не работает вообще, и узнать это надо сейчас, а не через месяц разработки.
+#
+# Как проверяем: рисуем картинку с двузначным числом и просим модель его
+# назвать. Назвала — значит зрение работает от начала до конца: картинка
+# дошла, модель её увидела, ответ вернулся. Скрипт лежит в закрытом
+# репозитории и не тянет никаких зависимостей, PNG собирает сам.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Модель на шлюзе'
+        required: true
+        default: 'anthropic/claude-sonnet-5'
+        type: string
+
+jobs:
+  proverit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Забрать закрытый код
+        env:
+          RTOKEN: ${{ secrets.REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch claude/analyze-tz-agent-jl1e4d \
+            "https://x-access-token:${RTOKEN}@github.com/nosachev56/trade.git" kod
+
+      - name: Проверка зрения
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -uo pipefail
+          python3 kod/deploy/proverka_ai_gateway.py --key "$TOKEN" --model "$MODEL"
+          KOD=$?
+          echo
+          echo "код возврата: $KOD"
+          exit $KOD
