@@ -1,0 +1,110 @@
+name: "Разведка площадок: дословно"
+
+# Второй проход. Первый показал, куда смотреть:
+#
+# АВТО.РУ — пункты 7.2.2, 7.3 и 7.6 соглашения. Пункт 7.3 устроен как у
+# Харабы: запрет действует «без письменного разрешения», то есть разрешение
+# предусмотрено. Пункт 7.6 запрещает массовую рассылку пользователям, «не
+# осуществляющим Коммерческую деятельность» — а наш заказчик её осуществляет.
+# Нужен дословный текст.
+#
+# Ещё у Авто.ру Бизнес есть раздел «Выкуп авто с рынка» — по названию это
+# ровно наша задача. Читаем.
+#
+# ДРОМ — страницы открылись, но по ключевым словам ничего. Читаем целиком.
+#
+# АВИТО — ответил 429 на все три адреса: не пускает машины из дата-центров.
+# Пробуем ещё раз мягче, с паузами.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  chitat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Дословно
+        run: |
+          set -uo pipefail
+          BRAUZER="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+
+          vzyat() {
+            sleep 3
+            curl -sS -L --max-time 40 --compressed -A "$BRAUZER" -H 'Accept-Language: ru-RU,ru;q=0.9' -H 'Accept: text/html,application/xhtml+xml' -o stranica.html -w '%{http_code}' "$1" 2>/dev/null || echo "000"
+          }
+          tekst() {
+            perl -0777 -pe 's{<(script|style|noscript).*?</\1>}{ }gis; s{<[^>]+>}{ }gs; s{&nbsp;}{ }g; s{&amp;}{&}g; s{&quot;}{"}g; s{&laquo;}{«}g; s{&raquo;}{»}g; s{&#\d+;}{}g;' stranica.html | tr -s " \t" " " > tekst.txt
+          }
+
+          echo "############ АВТО.РУ: ЗАПРЕТЫ И РАЗРЕШЕНИЕ ############"
+          KOD=$(vzyat "https://yandex.ru/legal/autoru_terms_of_service/")
+          echo "ответ: $KOD"
+          if [ "$KOD" = "200" ]; then
+            tekst
+            echo
+            echo "--- пункт 7.2.2 и соседние ---"
+            grep -oE '7\.2\.2[^0-9]{0,700}' tekst.txt | head -1 | fold -w 100 -s | sed 's/^/  /'
+            echo
+            echo "--- пункт 7.3 (разрешение) ---"
+            grep -oE '7\.3\.[^0-9]{0,700}|7\.3 [^0-9]{0,700}' tekst.txt | head -1 | fold -w 100 -s | sed 's/^/  /'
+            echo
+            echo "--- пункт 7.6 (массовая рассылка) ---"
+            grep -oE '7\.6[^0-9]{0,700}' tekst.txt | head -1 | fold -w 100 -s | sed 's/^/  /'
+            echo
+            echo "--- что такое Коммерческая деятельность ---"
+            grep -oiE 'Коммерческая деятельность[^.]{0,500}\.' tekst.txt | head -2 | fold -w 100 -s | sed 's/^/  /'
+          fi
+
+          echo
+          echo "############ АВТО.РУ БИЗНЕС: ВЫКУП АВТО С РЫНКА ############"
+          for U in \
+            "https://yandex.ru/support/autoru-business/ru/vykup" \
+            "https://yandex.ru/support/autoru-business/ru/" \
+            "https://auto.ru/dealer/"
+          do
+            KOD=$(vzyat "$U")
+            echo "--- $U : $KOD"
+            [ "$KOD" = "200" ] || continue
+            tekst
+            head -c 1200 tekst.txt | fold -w 100 -s | sed 's/^/  /'
+            echo
+          done
+
+          echo
+          echo "############ ДРОМ: API БАЗЫ ############"
+          KOD=$(vzyat "https://baza.drom.ru/help/API")
+          echo "ответ: $KOD"
+          if [ "$KOD" = "200" ]; then tekst; head -c 1800 tekst.txt | fold -w 100 -s | sed 's/^/  /'; fi
+
+          echo
+          echo "############ ДРОМ: СОГЛАШЕНИЕ ############"
+          for U in \
+            "https://www.drom.ru/info/agreement.html" \
+            "https://www.drom.ru/info/rules/" \
+            "https://www.drom.ru/misc/agreement/" \
+            "https://www.drom.ru/info/"
+          do
+            KOD=$(vzyat "$U")
+            echo "--- $U : $KOD"
+            if [ "$KOD" = "200" ]; then
+              tekst
+              grep -inE 'автоматиз|робот|паук|програм|запрещ|не вправе|копирован' tekst.txt | head -8 | cut -c1-220 | sed 's/^/    /'
+            fi
+          done
+
+          echo
+          echo "############ АВИТО: ЕЩЁ ПОПЫТКА ############"
+          for U in \
+            "https://www.avito.ru/robots.txt" \
+            "https://www.avito.ru/legal/rules/terms-of-use" \
+            "https://developers.avito.ru/"
+          do
+            sleep 10
+            KOD=$(vzyat "$U")
+            echo "--- $U : $KOD"
+            if [ "$KOD" = "200" ]; then
+              tekst
+              head -c 900 tekst.txt | fold -w 100 -s | sed 's/^/    /'
+            fi
+          done
