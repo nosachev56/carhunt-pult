@@ -1,17 +1,24 @@
 name: Удалить старую машину
 
-# НЕОБРАТИМОЕ ДЕЙСТВИЕ. Владелец разрешил удалить машину 8879979 («Перекуп»),
-# которую заменила 8903371 («Перекуп 2»). Данных проекта на старой нет:
-# ничего, кроме недоустановленного исполнителя, туда не доехало.
+# НЕОБРАТИМОЕ ДЕЙСТВИЕ. Удаляет машину и освобождает её плавающий адрес.
 #
-# Защита от случайного запуска: номер машины вводится руками и сверяется.
-# Номер новой машины сюда ввести нельзя — он отвергается отдельной проверкой.
+# Терять на наших машинах нечего: всё, что на них есть, положено туда
+# скриптами из репозитория, а база пуста. Пересоздание — две минуты в панели
+# и два задания отсюда.
+#
+# Защита от случайного запуска двойная: номер вводится руками и проверяется
+# по аккаунту, плюс отдельное слово подтверждения.
 
 on:
   workflow_dispatch:
     inputs:
       nomer:
         description: 'Номер удаляемой машины (для сверки)'
+        required: true
+        default: ''
+        type: string
+      podtverzhdenie:
+        description: 'Напишите слово: удалить'
         required: true
         default: ''
         type: string
@@ -24,19 +31,22 @@ jobs:
       - name: Сверка
         env:
           NOMER: ${{ inputs.nomer }}
+          SLOVO: ${{ inputs.podtverzhdenie }}
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
         run: |
           set -euo pipefail
-          STARAYA=8879979
-          NOVAYA=8903371
-          if [ "$NOMER" = "$NOVAYA" ]; then
-            echo "Это номер НОВОЙ, работающей машины. Отказываюсь."
-            exit 1
-          fi
-          if [ "$NOMER" != "$STARAYA" ]; then
-            echo "Номер не совпал со старой машиной ($STARAYA). Ничего не делаю."
-            exit 1
-          fi
-          echo "сверка пройдена"
+          [ "$SLOVO" = "удалить" ] || { echo "Подтверждение не совпало."; exit 1; }
+          case "$NOMER" in
+            ''|*[!0-9]*) echo "Номер должен быть числом."; exit 1 ;;
+          esac
+          # Машина с таким номером должна существовать в аккаунте: иначе
+          # номер устарел или введён наугад.
+          API="https://api.timeweb.cloud/api/v1"
+          IMYA=$(curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/servers/$NOMER" \
+                 | jq -r '.server.name // empty')
+          [ -n "$IMYA" ] || { echo "Машины $NOMER в аккаунте нет."; exit 1; }
+          echo "сверка пройдена: id=$NOMER, имя «$IMYA»"
+          echo "NOMER=$NOMER" >> "$GITHUB_ENV"
 
       - name: Что именно удаляется
         env:
@@ -46,7 +56,7 @@ jobs:
           API="https://api.timeweb.cloud/api/v1"
           # Последний взгляд перед необратимым: имя и состояние должны
           # совпасть с ожидаемыми, иначе номер устарел.
-          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/servers/8879979" \
+          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/servers/$NOMER" \
             | jq -r '.server | "удаляю: id=\(.id)  имя=\(.name)  состояние=\(.status)  создан=\(.created_at)"'
 
       - name: Удалить
@@ -56,7 +66,7 @@ jobs:
           set -uo pipefail
           API="https://api.timeweb.cloud/api/v1"
           KOD=$(curl -s -o otvet.json -w '%{http_code}' -m 120 -X DELETE \
-            -H "Authorization: Bearer $TOKEN" "$API/servers/8879979")
+            -H "Authorization: Bearer $TOKEN" "$API/servers/$NOMER")
           echo "ответ: $KOD"
           cat otvet.json 2>/dev/null | head -c 500
           echo
@@ -75,7 +85,7 @@ jobs:
           # Отвязанный плавающий адрес продолжает тарифицироваться сам по
           # себе. Это самая частая забытая строка в счёте после удаления.
           OSIROTEL=$(curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/floating-ips" \
-            | jq -r '.ips[]? | select(.resource_id == null or .resource_id == 8879979) | .id')
+            | jq -r '.ips[]? | select(.resource_id == null or (.resource_id|tostring) == env.NOMER) | .id')
           if [ -z "$OSIROTEL" ]; then
             echo "лишних адресов не осталось"
           else
