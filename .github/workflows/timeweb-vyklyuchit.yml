@@ -1,0 +1,82 @@
+name: "Выключить сервер и померить расход"
+
+# Владелец просит выключить машину, пока проект стоит, чтобы не платить.
+#
+# ВАЖНО: у большинства российских хостингов выключенная машина продолжает
+# тарифицироваться — платят за резерв ресурсов, а не за работу. Поэтому
+# сначала снимаем расход, потом выключаем, потом снимаем снова. Ответ будет
+# измеренный, а не предполагаемый.
+#
+# Выключение обратимо: машина, диск и данные остаются на месте, включается
+# обратно одной кнопкой.
+
+on:
+  workflow_dispatch:
+    inputs:
+      deystvie:
+        description: 'shutdown — выключить, start — включить'
+        required: true
+        default: 'shutdown'
+        type: string
+
+jobs:
+  vyklyuchit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Расход до
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/account/finances" \
+            | jq -r '.finances | "  в час: \(.hourly_cost)   в месяц: \(.monthly_cost)   баланс: \(.balance)"'
+          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/servers" \
+            | jq -r '.servers[]? | "  id=\(.id)  \(.name)  \(.status)"'
+
+      - name: Действие
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+          DEYSTVIE: ${{ inputs.deystvie }}
+        run: |
+          set -euo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          case "$DEYSTVIE" in
+            shutdown|start) : ;;
+            *) echo "Разрешены только shutdown и start."; exit 1 ;;
+          esac
+          # Мягкое выключение: система гасится штатно, база успевает закрыться.
+          KOD=$(curl -s -o o.json -w '%{http_code}' -m 60 -X POST \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d "{\"action\":\"$DEYSTVIE\"}" "$API/servers/8903371/action")
+          echo "ответ: $KOD"
+          head -c 300 o.json; echo
+          case "$KOD" in 200|202|204) echo "принято" ;; *) exit 1 ;; esac
+
+      - name: Дождаться и померить расход после
+        env:
+          TOKEN: ${{ secrets.TIMEWEB_TOKEN }}
+          DEYSTVIE: ${{ inputs.deystvie }}
+        run: |
+          set -uo pipefail
+          API="https://api.timeweb.cloud/api/v1"
+          ZHDEM="off"; [ "$DEYSTVIE" = "start" ] && ZHDEM="on"
+          S=""
+          for i in $(seq 1 30); do
+            S=$(curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/servers/8903371" | jq -r '.server.status')
+            echo "  попытка $i: состояние $S"
+            [ "$S" = "$ZHDEM" ] && break
+            sleep 10
+          done
+          echo
+          # Счётчику нужно время, чтобы пересчитать. Ждём с запасом.
+          echo "жду минуту, чтобы счёт пересчитался"
+          sleep 60
+          echo
+          echo "=============== РАСХОД ПОСЛЕ =============="
+          curl -s -m 30 -H "Authorization: Bearer $TOKEN" "$API/account/finances" \
+            | jq -r '.finances | "  в час: \(.hourly_cost)   в месяц: \(.monthly_cost)   баланс: \(.balance)   хватит на: \(.hours_left) часов"'
+          echo
+          echo "Если «в час» не изменилось — выключенная машина тарифицируется"
+          echo "так же, как работающая, и экономии от остановки нет."
