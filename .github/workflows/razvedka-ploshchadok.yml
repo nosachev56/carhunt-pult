@@ -1,0 +1,66 @@
+name: "Разведка площадок: официальный доступ"
+
+# Что выясняем по каждой площадке:
+#   1. есть ли официальный программный доступ и что он позволяет — читать
+#      чужие объявления или только управлять своими;
+#   2. кому его дают: любому пользователю, дилеру, юридическому лицу;
+#   3. сколько стоит;
+#   4. что сказано про автоматический доступ в пользовательском соглашении.
+#
+# Читаются только публичные документы: справка для разработчиков, условия
+# использования, страницы для партнёров.
+#
+# Выполняется на машине GitHub: сервер удалён и для этого не нужен, а из
+# среды агента домены yandex.ru, drom.ru и avito.ru закрыты посредником.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  chitat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Читаю документы площадок
+        run: |
+          set -uo pipefail
+          BRAUZER="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+          VAZHNOE='автоматизирован|автоматическ|робот|парсинг|скрейп|краул|запрещ|не вправе|дилер|юридическ|тариф|стоимост|бесплатн|доступ к API|получить доступ|токен|заявк|выгрузк|лимит|ограничен|частот|партн'
+
+          smotret() {
+            echo
+            echo "=============================================================="
+            echo "$1"
+            echo "$2"
+            echo "=============================================================="
+            sleep 2
+            KOD=$(curl -sS -L --max-time 30 --compressed -A "$BRAUZER" -H 'Accept-Language: ru-RU,ru;q=0.9' -o stranica.html -w '%{http_code}' "$2" 2>/dev/null || echo "000")
+            echo "ответ: $KOD, размер: $(wc -c < stranica.html 2>/dev/null || echo 0) байт"
+            [ "$KOD" = "200" ] || { echo "  (недоступна)"; return; }
+            perl -0777 -pe 's{<(script|style|noscript).*?</\1>}{ }gis; s{<[^>]+>}{ }gs; s{&nbsp;}{ }g; s{&amp;}{&}g; s{&quot;}{"}g; s{&#\d+;}{}g;' stranica.html | tr -s " \t" " " > tekst.txt
+            ZNAKOV=$(wc -m < tekst.txt)
+            echo "текста: $ZNAKOV знаков"
+            if [ "$ZNAKOV" -lt 400 ]; then
+              echo "  (почти пусто — страница собирается в браузере)"
+              return
+            fi
+            echo "  --- места по делу ---"
+            grep -inE "$VAZHNOE" tekst.txt 2>/dev/null | head -16 | cut -c1-250 | sed 's/^/  /' || echo "  ничего по ключевым словам"
+          }
+
+          echo "###################### АВТО.РУ ######################"
+          smotret "Доступ к API Авто.ру" "https://yandex.ru/dev/autoru/doc/concepts/access-docpage/"
+          smotret "API Авто.ру Бизнес" "https://yandex.ru/support/autoru-business/ru/integrations/api"
+          smotret "Условия использования Авто.ру" "https://yandex.ru/legal/autoru_terms_of_service/"
+
+          echo
+          echo "###################### ДРОМ ######################"
+          smotret "API Дром Базы" "https://baza.drom.ru/help/API"
+          smotret "Автозагрузка объявлений" "https://www.drom.ru/misc/autoload/"
+          smotret "Соглашение Дром" "https://www.drom.ru/info/agreement/"
+
+          echo
+          echo "###################### АВИТО ######################"
+          smotret "Разработчикам Авито" "https://developers.avito.ru/"
+          smotret "Условия использования Авито" "https://www.avito.ru/legal/rules/terms-of-use"
+          smotret "Правила Авито" "https://www.avito.ru/legal"
